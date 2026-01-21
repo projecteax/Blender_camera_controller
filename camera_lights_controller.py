@@ -18,6 +18,18 @@ def camera_poll(_, obj):
     return obj is not None and obj.type == "CAMERA"
 
 
+def _iter_scene_lights(scene):
+    if not scene:
+        return []
+    return [obj for obj in scene.objects if obj and obj.type == "LIGHT"]
+
+
+def _iter_scene_cameras(scene):
+    if not scene:
+        return []
+    return [obj for obj in scene.objects if obj and obj.type == "CAMERA"]
+
+
 def _cleanup_camera_lights(camera_obj):
     if not camera_obj:
         return
@@ -63,6 +75,9 @@ def on_scene_camera_selected(scene, camera_obj):
         if scene.camera != camera_obj:
             scene.camera = camera_obj
         scene.clc_last_camera_name = camera_obj.name
+        # Keep the UI dropdown in sync when camera changes via viewport/scene.
+        if getattr(scene, "clc_camera_enum", "") != camera_obj.name:
+            scene.clc_camera_enum = camera_obj.name
         apply_lights_for_camera(scene, camera_obj)
         _sync_frame_from_camera(scene, camera_obj)
     finally:
@@ -73,6 +88,26 @@ def on_camera_prop_update(self, context):
     scene = context.scene
     camera_obj = scene.clc_active_camera
     on_scene_camera_selected(scene, camera_obj)
+
+
+def _camera_enum_items(self, context):
+    scene = getattr(context, "scene", None)
+    items = []
+    cameras = _iter_scene_cameras(scene)
+    for idx, cam in enumerate(cameras):
+        # identifier, name, description, icon, number
+        items.append((cam.name, cam.name, "Camera", "CAMERA_DATA", idx))
+    if not items:
+        items.append(("", "<No Cameras>", "No camera objects found", "ERROR", 0))
+    return items
+
+
+def on_camera_enum_update(self, context):
+    scene = context.scene
+    cam_name = scene.clc_camera_enum
+    cam_obj = scene.objects.get(cam_name) if cam_name else None
+    if cam_obj and cam_obj.type == "CAMERA":
+        scene.clc_active_camera = cam_obj
 
 
 @persistent
@@ -162,6 +197,119 @@ class CLC_OT_clear_camera_lights(bpy.types.Operator):
             return {"CANCELLED"}
         camera_obj.clc_lights.clear()
         apply_lights_for_camera(scene, camera_obj)
+        return {"FINISHED"}
+
+
+class CLC_OT_assign_all_lights(bpy.types.Operator):
+    bl_idname = "clc.assign_all_lights"
+    bl_label = "Assign All Lights"
+    bl_options = {"UNDO"}
+
+    def execute(self, context):
+        scene = context.scene
+        camera_obj = scene.clc_active_camera
+        if not camera_obj:
+            return {"CANCELLED"}
+
+        assigned = _assigned_lights(camera_obj)
+        for obj in _iter_scene_lights(scene):
+            if obj in assigned:
+                continue
+            item = camera_obj.clc_lights.add()
+            item.light = obj
+        apply_lights_for_camera(scene, camera_obj)
+        return {"FINISHED"}
+
+
+class CLC_OT_select_object_in_scene(bpy.types.Operator):
+    bl_idname = "clc.select_object_in_scene"
+    bl_label = "Select Object"
+    bl_options = {"UNDO"}
+
+    object_name: bpy.props.StringProperty()
+
+    def execute(self, context):
+        scene = context.scene
+        obj = scene.objects.get(self.object_name) if scene else None
+        if not obj:
+            return {"CANCELLED"}
+
+        # Make selection explicit and predictable.
+        bpy.ops.object.select_all(action="DESELECT")
+        obj.select_set(True)
+        context.view_layer.objects.active = obj
+        return {"FINISHED"}
+
+
+class CLC_OT_rename_light(bpy.types.Operator):
+    bl_idname = "clc.rename_light"
+    bl_label = "Rename Light"
+    bl_options = {"UNDO"}
+
+    light_name: bpy.props.StringProperty()
+    new_name: bpy.props.StringProperty(name="New Name", default="")
+
+    def invoke(self, context, event):
+        scene = context.scene
+        light_obj = scene.objects.get(self.light_name) if scene else None
+        if not light_obj or light_obj.type != "LIGHT":
+            return {"CANCELLED"}
+        self.new_name = light_obj.name
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        scene = context.scene
+        light_obj = scene.objects.get(self.light_name) if scene else None
+        if not light_obj or light_obj.type != "LIGHT":
+            return {"CANCELLED"}
+        if not self.new_name or self.new_name.strip() == "":
+            return {"CANCELLED"}
+        new_name = self.new_name.strip()
+        if new_name == light_obj.name:
+            return {"CANCELLED"}
+        # Check if name already exists
+        if new_name in scene.objects:
+            self.report({"ERROR"}, f"Name '{new_name}' already exists")
+            return {"CANCELLED"}
+        light_obj.name = new_name
+        return {"FINISHED"}
+
+
+class CLC_OT_rename_camera(bpy.types.Operator):
+    bl_idname = "clc.rename_camera"
+    bl_label = "Rename Camera"
+    bl_options = {"UNDO"}
+
+    camera_name: bpy.props.StringProperty()
+    new_name: bpy.props.StringProperty(name="New Name", default="")
+
+    def invoke(self, context, event):
+        scene = context.scene
+        camera_obj = scene.objects.get(self.camera_name) if scene else None
+        if not camera_obj or camera_obj.type != "CAMERA":
+            return {"CANCELLED"}
+        self.new_name = camera_obj.name
+        return context.window_manager.invoke_props_dialog(self)
+
+    def execute(self, context):
+        scene = context.scene
+        camera_obj = scene.objects.get(self.camera_name) if scene else None
+        if not camera_obj or camera_obj.type != "CAMERA":
+            return {"CANCELLED"}
+        if not self.new_name or self.new_name.strip() == "":
+            return {"CANCELLED"}
+        new_name = self.new_name.strip()
+        if new_name == camera_obj.name:
+            return {"CANCELLED"}
+        # Check if name already exists
+        if new_name in scene.objects:
+            self.report({"ERROR"}, f"Name '{new_name}' already exists")
+            return {"CANCELLED"}
+        old_name = camera_obj.name
+        camera_obj.name = new_name
+        # Update enum if this was the active camera
+        if scene.clc_active_camera == camera_obj:
+            scene.clc_camera_enum = new_name
         return {"FINISHED"}
 
 
@@ -256,7 +404,13 @@ class CLC_PT_main_panel(bpy.types.Panel):
 
         box = layout.box()
         box.label(text="Camera")
-        box.prop_search(scene, "clc_active_camera", scene, "objects", text="")
+        row = box.row(align=True)
+        row.prop(scene, "clc_camera_enum", text="")
+        if camera_obj:
+            select_op = row.operator("clc.select_object_in_scene", text="", icon="RESTRICT_SELECT_OFF")
+            select_op.object_name = camera_obj.name
+            rename_op = row.operator("clc.rename_camera", text="", icon="OUTLINER_OB_FONT")
+            rename_op.camera_name = camera_obj.name
         row = box.row(align=True)
         row.operator("clc.open_camera_window", text="Open Camera Window", icon="CAMERA_DATA")
         row.operator("clc.insert_keyframes", text="Insert Keyframes", icon="KEY_HLT")
@@ -280,16 +434,29 @@ class CLC_PT_main_panel(bpy.types.Panel):
             return
 
         _cleanup_camera_lights(camera_obj)
-        for obj in scene.objects:
-            if obj.type != "LIGHT":
-                continue
-            is_assigned = obj in _assigned_lights(camera_obj)
+        assigned_now = _assigned_lights(camera_obj)
+        for obj in _iter_scene_lights(scene):
+            is_assigned = obj in assigned_now
             row = lights_box.row(align=True)
+
+            # Checkbox only (no text) so clicking the name won't do anything to selection.
             icon = "CHECKBOX_HLT" if is_assigned else "CHECKBOX_DEHLT"
-            op = row.operator("clc.toggle_light_assignment", text=obj.name, icon=icon, emboss=False)
+            op = row.operator("clc.toggle_light_assignment", text="", icon=icon, emboss=True)
             op.light_name = obj.name
 
+            # Non-clickable label for the name.
+            row.label(text=obj.name, icon="LIGHT")
+
+            # Explicit "select in scene" arrow/button.
+            sel = row.operator("clc.select_object_in_scene", text="", icon="RESTRICT_SELECT_OFF")
+            sel.object_name = obj.name
+
+            # Rename button (Aa icon).
+            rename_op = row.operator("clc.rename_light", text="", icon="OUTLINER_OB_FONT")
+            rename_op.light_name = obj.name
+
         row = lights_box.row(align=True)
+        row.operator("clc.assign_all_lights", text="Select All", icon="CHECKMARK")
         row.operator("clc.assign_selected_lights", text="Assign Selected")
         row.operator("clc.clear_camera_lights", text="Clear")
 
@@ -299,6 +466,10 @@ classes = (
     CLC_OT_toggle_light_assignment,
     CLC_OT_assign_selected_lights,
     CLC_OT_clear_camera_lights,
+    CLC_OT_assign_all_lights,
+    CLC_OT_select_object_in_scene,
+    CLC_OT_rename_light,
+    CLC_OT_rename_camera,
     CLC_OT_open_camera_window,
     CLC_OT_set_camera_frame_from_current,
     CLC_OT_jump_to_camera_frame,
@@ -317,6 +488,12 @@ def register():
         update=on_camera_prop_update,
     )
     bpy.types.Scene.clc_last_camera_name = bpy.props.StringProperty(default="")
+    bpy.types.Scene.clc_camera_enum = bpy.props.EnumProperty(
+        name="Cameras",
+        description="Choose the active camera",
+        items=_camera_enum_items,
+        update=on_camera_enum_update,
+    )
 
     bpy.types.Object.clc_lights = bpy.props.CollectionProperty(type=CLC_LightItem)
     bpy.types.Object.clc_frame = bpy.props.IntProperty(min=1, default=1)
@@ -339,6 +516,7 @@ def unregister():
     del bpy.types.Object.clc_use_frame
     del bpy.types.Scene.clc_active_camera
     del bpy.types.Scene.clc_last_camera_name
+    del bpy.types.Scene.clc_camera_enum
 
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
